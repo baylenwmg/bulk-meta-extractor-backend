@@ -4,20 +4,30 @@ import cors from "cors";
 import { JSDOM } from "jsdom";
 
 const app = express();
-app.use(cors());
+
+/* ======================
+   HARD CORS FIX (CRITICAL)
+====================== */
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"]
+}));
+
+app.options("*", cors());
 app.use(express.json());
 
 /* ======================
-   PERFORMANCE SETTINGS
+   SETTINGS
 ====================== */
-const TIMEOUT_MS = 10000;        // faster fail
-const CONCURRENCY = 4;           // safe parallelism
-const RETRY_COUNT = 2;           // keep retry logic
+const TIMEOUT_MS = 10000;
+const CONCURRENCY = 3;
+const RETRY_COUNT = 2;
 const USER_AGENT =
-  "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0; +https://github.com)";
+  "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0)";
 
 /* ======================
-   SAFE FETCH WITH TIMEOUT
+   FETCH WITH TIMEOUT
 ====================== */
 async function fetchWithTimeout(url) {
   const controller = new AbortController();
@@ -37,10 +47,10 @@ async function fetchWithTimeout(url) {
    META EXTRACTION
 ====================== */
 async function extractMeta(url) {
-  const response = await fetchWithTimeout(url);
-  if (!response.ok) throw new Error("Fetch failed");
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) throw new Error("Fetch failed");
 
-  const html = await response.text();
+  const html = await res.text();
   const dom = new JSDOM(html);
   const doc = dom.window.document;
 
@@ -48,59 +58,30 @@ async function extractMeta(url) {
     title: doc.querySelector("title")?.textContent.trim() || "",
     description:
       doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() || "",
-    h1: [...doc.querySelectorAll("h1")]
-      .map(el => el.textContent.trim())
-      .filter(Boolean)
-      .join("\n"),
-    h2: [...doc.querySelectorAll("h2")]
-      .map(el => el.textContent.trim())
-      .filter(Boolean)
-      .join("\n")
+    h1: [...doc.querySelectorAll("h1")].map(e => e.textContent.trim()).join("\n"),
+    h2: [...doc.querySelectorAll("h2")].map(e => e.textContent.trim()).join("\n")
   };
 }
 
 /* ======================
-   PROCESS SINGLE URL
+   PROCESS URL
 ====================== */
 async function processUrl(url) {
-  for (let attempt = 1; attempt <= RETRY_COUNT; attempt++) {
+  for (let i = 0; i < RETRY_COUNT; i++) {
     try {
       const data = await extractMeta(url);
-      return {
-        url,
-        ...data,
-        status: "Success"
-      };
-    } catch (err) {
-      if (attempt === RETRY_COUNT) {
-        return {
-          url,
-          title: "",
-          description: "",
-          h1: "",
-          h2: "",
-          status: "Failed (retried)"
-        };
-      }
-    }
-  }
-}
-
-/* ======================
-   PARALLEL BATCH PROCESSOR
-====================== */
-async function processInBatches(urls) {
-  const results = [];
-
-  for (let i = 0; i < urls.length; i += CONCURRENCY) {
-    const batch = urls.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(
-      batch.map(url => processUrl(url))
-    );
-    results.push(...batchResults);
+      return { url, ...data, status: "Success" };
+    } catch {}
   }
 
-  return results;
+  return {
+    url,
+    title: "",
+    description: "",
+    h1: "",
+    h2: "",
+    status: "Failed"
+  };
 }
 
 /* ======================
@@ -109,19 +90,20 @@ async function processInBatches(urls) {
 app.post("/extract", async (req, res) => {
   try {
     const urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+    const results = [];
 
-    if (!urls.length) {
-      return res.status(400).json({ error: "No URLs provided" });
+    for (let i = 0; i < urls.length; i += CONCURRENCY) {
+      const batch = urls.slice(i, i + CONCURRENCY);
+      const batchResults = await Promise.all(batch.map(processUrl));
+      results.push(...batchResults);
     }
 
-    const results = await processInBatches(urls);
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.json(results);
 
-  } catch (error) {
-    res.status(500).json({
-      error: "Extraction failed",
-      message: error.message
-    });
+  } catch (err) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.status(500).json({ error: "Extraction failed" });
   }
 });
 
@@ -129,13 +111,14 @@ app.post("/extract", async (req, res) => {
    HEALTH CHECK
 ====================== */
 app.get("/", (_, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.send("Bulk Meta Extractor backend running");
 });
 
 /* ======================
-   START SERVER
+   START
 ====================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log("Backend running on port", PORT);
 });
