@@ -7,92 +7,135 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const TIMEOUT = 15000;
+/* ======================
+   PERFORMANCE SETTINGS
+====================== */
+const TIMEOUT_MS = 10000;        // faster fail
+const CONCURRENCY = 4;           // safe parallelism
+const RETRY_COUNT = 2;           // keep retry logic
+const USER_AGENT =
+  "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0; +https://github.com)";
 
+/* ======================
+   SAFE FETCH WITH TIMEOUT
+====================== */
 async function fetchWithTimeout(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
     return await fetch(url, {
       signal: controller.signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0)"
-      }
+      headers: { "User-Agent": USER_AGENT }
     });
   } finally {
     clearTimeout(timeout);
   }
 }
 
+/* ======================
+   META EXTRACTION
+====================== */
 async function extractMeta(url) {
-  const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error("Fetch failed");
+  const response = await fetchWithTimeout(url);
+  if (!response.ok) throw new Error("Fetch failed");
 
-  const html = await res.text();
+  const html = await response.text();
   const dom = new JSDOM(html);
   const doc = dom.window.document;
 
   return {
     title: doc.querySelector("title")?.textContent.trim() || "",
     description:
-      doc.querySelector('meta[name="description"]')?.content?.trim() || "",
+      doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() || "",
     h1: [...doc.querySelectorAll("h1")]
-      .map(h => h.textContent.trim())
+      .map(el => el.textContent.trim())
       .filter(Boolean)
       .join("\n"),
     h2: [...doc.querySelectorAll("h2")]
-      .map(h => h.textContent.trim())
+      .map(el => el.textContent.trim())
       .filter(Boolean)
       .join("\n")
   };
 }
 
-app.post("/extract", async (req, res) => {
-  const urls = req.body.urls || [];
-  const results = [];
-
-  for (const url of urls) {
-    let data = null;
-
-    // retry once
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        data = await extractMeta(url);
-        break;
-      } catch {}
-    }
-
-    if (data) {
-      results.push({
+/* ======================
+   PROCESS SINGLE URL
+====================== */
+async function processUrl(url) {
+  for (let attempt = 1; attempt <= RETRY_COUNT; attempt++) {
+    try {
+      const data = await extractMeta(url);
+      return {
         url,
-        title: data.title,
-        description: data.description,
-        h1: data.h1,
-        h2: data.h2,
+        ...data,
         status: "Success"
-      });
-    } else {
-      results.push({
-        url,
-        title: "",
-        description: "",
-        h1: "",
-        h2: "",
-        status: "Failed (retried)"
-      });
+      };
+    } catch (err) {
+      if (attempt === RETRY_COUNT) {
+        return {
+          url,
+          title: "",
+          description: "",
+          h1: "",
+          h2: "",
+          status: "Failed (retried)"
+        };
+      }
     }
   }
+}
 
-  res.json(results);
+/* ======================
+   PARALLEL BATCH PROCESSOR
+====================== */
+async function processInBatches(urls) {
+  const results = [];
+
+  for (let i = 0; i < urls.length; i += CONCURRENCY) {
+    const batch = urls.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(url => processUrl(url))
+    );
+    results.push(...batchResults);
+  }
+
+  return results;
+}
+
+/* ======================
+   API ENDPOINT
+====================== */
+app.post("/extract", async (req, res) => {
+  try {
+    const urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+
+    if (!urls.length) {
+      return res.status(400).json({ error: "No URLs provided" });
+    }
+
+    const results = await processInBatches(urls);
+    res.json(results);
+
+  } catch (error) {
+    res.status(500).json({
+      error: "Extraction failed",
+      message: error.message
+    });
+  }
 });
 
+/* ======================
+   HEALTH CHECK
+====================== */
 app.get("/", (_, res) => {
   res.send("Bulk Meta Extractor backend running");
 });
 
+/* ======================
+   START SERVER
+====================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Backend running on port", PORT);
+  console.log(`Backend running on port ${PORT}`);
 });
