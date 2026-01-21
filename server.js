@@ -42,7 +42,25 @@ async function fetchWithTimeout(url) {
     clearTimeout(timeout);
   }
 }
-
+/* ======================
+   SITEMAP PARSING
+====================== */
+async function getUrlsFromSitemap(sitemapUrl) {
+  try {
+    const res = await fetchWithTimeout(sitemapUrl);
+    if (!res.ok) throw new Error("Sitemap fetch failed");
+    const xml = await res.text();
+    
+    // Simple regex to find <loc>URL</loc> tags
+    const matches = xml.match(/<loc>(.*?)<\/loc>/g);
+    if (!matches) return [];
+    
+    return matches.map(m => m.replace(/<\/?loc>/g, "").trim());
+  } catch (err) {
+    console.error("Sitemap Error:", err);
+    return [];
+  }
+}
 /* ======================
    META EXTRACTION
 ====================== */
