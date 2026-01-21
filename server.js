@@ -44,6 +44,41 @@ async function fetchWithTimeout(url) {
 }
 
 /* ======================
+   SITEMAP PARSING
+====================== */
+async function getUrlsFromSitemap(sitemapUrl, visited = new Set()) {
+  if (visited.has(sitemapUrl)) return [];
+  visited.add(sitemapUrl);
+
+  const res = await fetchWithTimeout(sitemapUrl);
+  if (!res.ok) throw new Error(`Failed to fetch sitemap: ${sitemapUrl} (Status: ${res.status})`);
+
+  const xml = await res.text();
+  const dom = new JSDOM(xml, { contentType: "text/xml" });
+  const doc = dom.window.document;
+
+  const urls = [];
+
+  // Check for standard sitemap
+  const locs = doc.querySelectorAll("url > loc");
+  locs.forEach(loc => {
+    const url = loc.textContent.trim();
+    if (url) urls.push(url);
+  });
+
+  // Check for sitemap index
+  const sitemaps = doc.querySelectorAll("sitemap > loc");
+  const subSitemapUrls = [...sitemaps].map(s => s.textContent.trim()).filter(Boolean);
+
+  if (subSitemapUrls.length > 0) {
+    const subUrlsResults = await Promise.all(subSitemapUrls.map(u => getUrlsFromSitemap(u, visited)));
+    subUrlsResults.forEach(subUrls => urls.push(...subUrls));
+  }
+
+  return [...new Set(urls)];
+}
+
+/* ======================
    META EXTRACTION
 ====================== */
 async function extractMeta(url) {
@@ -145,7 +180,20 @@ async function processUrl(url) {
 ====================== */
 app.post("/extract", async (req, res) => {
   try {
-    const urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+    let urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+
+    if (req.body.isSitemap && urls.length > 0) {
+      try {
+        const sitemapUrl = urls[0];
+        if (!isValidUrl(sitemapUrl)) {
+          return res.status(400).json({ error: "Invalid Sitemap URL" });
+        }
+        urls = await getUrlsFromSitemap(sitemapUrl);
+      } catch (err) {
+        return res.status(400).json({ error: `Sitemap error: ${err.message}` });
+      }
+    }
+
     const results = [];
 
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
