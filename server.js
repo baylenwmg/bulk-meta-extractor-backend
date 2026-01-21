@@ -23,8 +23,7 @@ app.use(express.json());
 const TIMEOUT_MS = 10000;
 const CONCURRENCY = 3;
 const RETRY_COUNT = 2;
-const USER_AGENT =
-  "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0)";
+const USER_AGENT = "Mozilla/5.0 (compatible; BulkMetaExtractor/1.0)";
 
 /* ======================
    FETCH WITH TIMEOUT
@@ -42,6 +41,7 @@ async function fetchWithTimeout(url) {
     clearTimeout(timeout);
   }
 }
+
 /* ======================
    SITEMAP PARSING
 ====================== */
@@ -51,22 +51,25 @@ async function getUrlsFromSitemap(sitemapUrl) {
     if (!res.ok) throw new Error("Sitemap fetch failed");
     const xml = await res.text();
     
-    // Simple regex to find <loc>URL</loc> tags
+    // Regex to find <loc>URL</loc> tags
     const matches = xml.match(/<loc>(.*?)<\/loc>/g);
     if (!matches) return [];
     
-    return matches.map(m => m.replace(/<\/?loc>/g, "").trim());
+    // Clean tags and remove duplicates
+    const urls = matches.map(m => m.replace(/<\/?loc>/g, "").trim());
+    return [...new Set(urls)];
   } catch (err) {
     console.error("Sitemap Error:", err);
     return [];
   }
 }
+
 /* ======================
    META EXTRACTION
 ====================== */
 async function extractMeta(url) {
   const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error("Fetch failed");
+  if (!res.ok) throw new Error(`Fetch failed for ${url}`);
 
   const html = await res.text();
   const dom = new JSDOM(html);
@@ -74,22 +77,23 @@ async function extractMeta(url) {
 
   return {
     title: doc.querySelector("title")?.textContent.trim() || "",
-    description:
-      doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() || "",
+    description: doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() || "",
     h1: [...doc.querySelectorAll("h1")].map(e => e.textContent.trim()).join("\n"),
     h2: [...doc.querySelectorAll("h2")].map(e => e.textContent.trim()).join("\n")
   };
 }
 
 /* ======================
-   PROCESS URL
+   PROCESS URL (RETRY LOGIC)
 ====================== */
 async function processUrl(url) {
   for (let i = 0; i < RETRY_COUNT; i++) {
     try {
       const data = await extractMeta(url);
       return { url, ...data, status: "Success" };
-    } catch {}
+    } catch (e) {
+      if (i === RETRY_COUNT - 1) console.error(`Failed after ${RETRY_COUNT} attempts: ${url}`);
+    }
   }
 
   return {
@@ -103,22 +107,32 @@ async function processUrl(url) {
 }
 
 /* ======================
-   API ENDPOINT
+   NEW ENDPOINT: PARSE SITEMAP ONLY
+   (Used for Progress Bar Init)
+====================== */
+app.post("/parse-sitemap", async (req, res) => {
+  try {
+    const { sitemapUrl } = req.body;
+    if (!sitemapUrl) return res.status(400).json({ error: "Sitemap URL required" });
+    
+    const urls = await getUrlsFromSitemap(sitemapUrl);
+    res.json({ urls });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to parse sitemap" });
+  }
+});
+
+/* ======================
+   EXTRACTION ENDPOINT
+   (Handles both single and batch URLs)
 ====================== */
 app.post("/extract", async (req, res) => {
   try {
-    let urls = Array.isArray(req.body.urls) ? req.body.urls : [];
-    
-    // NEW: If a sitemap is provided, fetch those URLs first
-    if (req.body.sitemapUrl) {
-      const sitemapUrls = await getUrlsFromSitemap(req.body.sitemapUrl);
-      urls = [...urls, ...sitemapUrls];
-    }
-
-    // Filter duplicates
-    urls = [...new Set(urls)];
+    const urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+    if (urls.length === 0) return res.json([]);
 
     const results = [];
+    // Process in internal batches to respect concurrency
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const batchResults = await Promise.all(batch.map(processUrl));
@@ -135,7 +149,6 @@ app.post("/extract", async (req, res) => {
    HEALTH CHECK
 ====================== */
 app.get("/", (_, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
   res.send("Bulk Meta Extractor backend running");
 });
 
