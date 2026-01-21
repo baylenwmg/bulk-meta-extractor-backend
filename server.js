@@ -107,20 +107,26 @@ async function processUrl(url) {
 ====================== */
 app.post("/extract", async (req, res) => {
   try {
-    const urls = Array.isArray(req.body.urls) ? req.body.urls : [];
-    const results = [];
+    let urls = Array.isArray(req.body.urls) ? req.body.urls : [];
+    
+    // NEW: If a sitemap is provided, fetch those URLs first
+    if (req.body.sitemapUrl) {
+      const sitemapUrls = await getUrlsFromSitemap(req.body.sitemapUrl);
+      urls = [...urls, ...sitemapUrls];
+    }
 
+    // Filter duplicates
+    urls = [...new Set(urls)];
+
+    const results = [];
     for (let i = 0; i < urls.length; i += CONCURRENCY) {
       const batch = urls.slice(i, i + CONCURRENCY);
       const batchResults = await Promise.all(batch.map(processUrl));
       results.push(...batchResults);
     }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.json(results);
-
   } catch (err) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.status(500).json({ error: "Extraction failed" });
   }
 });
