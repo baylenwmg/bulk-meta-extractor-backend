@@ -48,7 +48,12 @@ async function fetchWithTimeout(url) {
 ====================== */
 async function extractMeta(url) {
   const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error("Fetch failed");
+  if (!res.ok) throw new Error(`Fetch failed (Status: ${res.status})`);
+
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("text/html")) {
+    throw new Error(`Not an HTML page (Content-Type: ${contentType})`);
+  }
 
   const html = await res.text();
   const dom = new JSDOM(html);
@@ -59,28 +64,79 @@ async function extractMeta(url) {
     description:
       doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() || "",
     h1: [...doc.querySelectorAll("h1")].map(e => e.textContent.trim()).join("\n"),
-    h2: [...doc.querySelectorAll("h2")].map(e => e.textContent.trim()).join("\n")
+    h2: [...doc.querySelectorAll("h2")].map(e => e.textContent.trim()).join("\n"),
+    ogTitle: doc.querySelector('meta[property="og:title"]')?.getAttribute("content")?.trim() || "",
+    ogDescription: doc.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim() || "",
+    ogImage: doc.querySelector('meta[property="og:image"]')?.getAttribute("content")?.trim() || "",
+    twitterCard: doc.querySelector('meta[name="twitter:card"]')?.getAttribute("content")?.trim() || "",
+    twitterTitle: doc.querySelector('meta[name="twitter:title"]')?.getAttribute("content")?.trim() || "",
+    twitterDescription: doc.querySelector('meta[name="twitter:description"]')?.getAttribute("content")?.trim() || "",
+    twitterImage: doc.querySelector('meta[name="twitter:image"]')?.getAttribute("content")?.trim() || "",
+    canonical: doc.querySelector('link[rel="canonical"]')?.getAttribute("href")?.trim() || ""
   };
 }
 
 /* ======================
    PROCESS URL
 ====================== */
-async function processUrl(url) {
-  for (let i = 0; i < RETRY_COUNT; i++) {
-    try {
-      const data = await extractMeta(url);
-      return { url, ...data, status: "Success" };
-    } catch {}
-  }
+function isValidUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
 
-  return {
-    url,
+    const hostname = parsed.hostname.toLowerCase();
+    // Basic SSRF protection
+    const blockedHosts = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
+    if (blockedHosts.includes(hostname)) return false;
+    if (hostname.endsWith(".local")) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function processUrl(url) {
+  const emptyData = {
     title: "",
     description: "",
     h1: "",
     h2: "",
-    status: "Failed"
+    ogTitle: "",
+    ogDescription: "",
+    ogImage: "",
+    twitterCard: "",
+    twitterTitle: "",
+    twitterDescription: "",
+    twitterImage: "",
+    canonical: ""
+  };
+
+  if (!isValidUrl(url)) {
+    return {
+      url,
+      ...emptyData,
+      status: "Failed",
+      reason: "Invalid URL"
+    };
+  }
+
+  let lastError = null;
+  for (let i = 0; i < RETRY_COUNT; i++) {
+    try {
+      const data = await extractMeta(url);
+      return { url, ...data, status: "Success" };
+    } catch (err) {
+      lastError = err.message;
+      console.warn(`Attempt ${i + 1} failed for ${url}: ${err.message}`);
+    }
+  }
+
+  return {
+    url,
+    ...emptyData,
+    status: "Failed",
+    reason: lastError || "Unknown error"
   };
 }
 
@@ -98,11 +154,10 @@ app.post("/extract", async (req, res) => {
       results.push(...batchResults);
     }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.json(results);
 
   } catch (err) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    console.error("API Error:", err);
     res.status(500).json({ error: "Extraction failed" });
   }
 });
@@ -111,8 +166,15 @@ app.post("/extract", async (req, res) => {
    HEALTH CHECK
 ====================== */
 app.get("/", (_, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
   res.send("Bulk Meta Extractor backend running");
+});
+
+/* ======================
+   ERROR HANDLING
+====================== */
+app.use((err, req, res, next) => {
+  console.error("Unhandled Error:", err);
+  res.status(500).json({ error: "Internal Server Error" });
 });
 
 /* ======================
